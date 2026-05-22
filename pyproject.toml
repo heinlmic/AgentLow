@@ -1,0 +1,18 @@
+[project]
+name = "zakon-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "claude-agent-sdk",
+    "httpx",
+    "beautifulsoup4",
+    "lxml",
+    "anyio",
+]
+
+[project.scripts]
+zakon = "zakon_agent.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
