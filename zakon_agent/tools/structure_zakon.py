@@ -1,0 +1,26 @@
+import re
+
+ODKAZ_PATTERN = re.compile(
+    r'(?:zákon|vyhláška|nařízení)[a-z\s]*č\.\s*(\d+/\d{4})\s*Sb', re.IGNORECASE
+)
+PARAGRAF_PATTERN = re.compile(r'^§\s*(\d+\w*)\s*(.*?)$', re.MULTILINE)
+
+
+def structure_zakon(text: str) -> dict:
+    paragrafy = {}
+    for match in PARAGRAF_PATTERN.finditer(text):
+        cislo = f"§{match.group(1)}"
+        nadpis = match.group(2).strip()
+        paragrafy[cislo] = nadpis
+
+    odkazy = sorted(set(ODKAZ_PATTERN.findall(text)))
+
+    seznam_paragrafu = ", ".join(
+        f"{k} {v}" if v else k for k, v in list(paragrafy.items())[:50]
+    )
+
+    return {
+        "paragrafy": paragrafy,
+        "odkazy": odkazy,
+        "seznam_paragrafu": seznam_paragrafu,
+    }
