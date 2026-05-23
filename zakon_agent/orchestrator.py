@@ -1,0 +1,287 @@
+import json
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    HookContext,
+    HookMatcher,
+    TextBlock,
+    UserPromptSubmitHookInput,
+    create_sdk_mcp_server,
+    tool,
+)
+from claude_agent_sdk.types import HookJSONOutput
+
+from zakon_agent import registry
+from zakon_agent.agents.sub_agent import spawn_sub_agent
+from zakon_agent.agents.temporary_agent import process_zakon
+from zakon_agent.store import get_zakon, set_zakon
+from zakon_agent.tools.fetch_zakon import fetch_zakon
+from zakon_agent.tools.validate_url import build_and_validate
+
+ROOT = Path(__file__).parent.parent
+DATA_DIR = ROOT / "data" / "zakony"
+MODEL = "claude-sonnet-4-6"
+
+SYSTEM_PROMPT = """Jsi orchestrátor systému pro analýzu českých zákonů.
+
+## Nástroje
+- check_index(zakon_id): je zákon v lokální databázi?
+- validate_zakon_url(zakon_id): ověř URL na zakonyprolidi.cz
+- spawn_zakon_agent(zakon_id, url): načti zákon a spusť sub-agenta
+  → pokud zákon je v databázi: url=""
+  → pokud zákon je nový: url=validovaná URL
+- ask_zakon_agent(zakon_id, dotaz): přepošli dotaz sub-agentovi
+- list_active_agents(): kdo běží
+- add_to_pending(zakon_id, zminen_v): zákon do zásobníku
+- list_pending_zakony(): zásobník
+- load_from_pending(zakon_id): načti ze zásobníku
+- get_zakon_tree(): strom vztahů
+
+## Postup pro zákon zmíněný uživatelem (formát X/RRRR)
+1. check_index(zakon_id)
+2. JE v databázi → spawn_zakon_agent(zakon_id, url="") → ask_zakon_agent(...)
+3. NENÍ v databázi → validate_zakon_url(zakon_id)
+   a. URL platná → zeptej se uživatele: "Nalezl jsem zákon X/RRRR. Mám ho načíst?"
+      - Uživatel ANO → spawn_zakon_agent(zakon_id, url)
+      - Uživatel NE / SPÄTER → add_to_pending(zakon_id, zminen_v="")
+   b. URL neplatná → informuj uživatele, požádej o URL ručně
+
+## Detekce odkazů v odpovědích sub-agentů
+Pokud odpověď sub-agenta obsahuje "zákon č. X/RRRR Sb." nebo "vyhláška č. X/RRRR Sb.":
+1. check_index pro každý detekovaný předpis
+2. Pokud není v databázi ani v zásobníku → add_to_pending(zakon_id, zminen_v=aktualni_zakon_id)
+3. Na konci odpovědi upozorni: "Zaznamenal jsem odkaz na [X/RRRR]. Chceš ho načíst?"
+
+## Pravidla
+- NIKDY neodpovídej na právní dotazy z vlastní znalosti. Vždy použij ask_zakon_agent.
+- Zákon ID je vždy formát "CISLO/ROK" (např. "183/2006").
+- Pokud zásobník není prázdný, vždy nabídni načtení na konci odpovědi."""
+
+
+def _mcp_text(text: str) -> dict:
+    return {"content": [{"type": "text", "text": text}]}
+
+
+# --- 6a: Read-only nástroje ---
+
+@tool("check_index", "Zkontroluj jestli zákon existuje v lokální databázi", {"zakon_id": str})
+async def check_index_tool(args: dict[str, Any]) -> dict[str, Any]:
+    meta = get_zakon(args["zakon_id"])
+    if meta:
+        return _mcp_text(json.dumps(meta, ensure_ascii=False))
+    return _mcp_text("Zákon není v databázi")
+
+
+@tool("list_active_agents", "Vypiš zákon ID všech aktivních sub-agentů", {"_dummy": str})
+async def list_active_agents_tool(args: dict[str, Any]) -> dict[str, Any]:
+    if not registry.agent_registry:
+        return _mcp_text("Žádní aktivní agenti")
+    return _mcp_text(", ".join(registry.agent_registry.keys()))
+
+
+@tool("list_pending_zakony", "Vypiš zásobník zákonů čekajících na načtení", {"_dummy": str})
+async def list_pending_tool(args: dict[str, Any]) -> dict[str, Any]:
+    if not registry.pending_zakony:
+        return _mcp_text("Zásobník je prázdný")
+    return _mcp_text(json.dumps(registry.pending_zakony, ensure_ascii=False))
+
+
+@tool("get_zakon_tree", "Zobraz strom vztahů mezi načtenými zákony", {"_dummy": str})
+async def get_zakon_tree_tool(args: dict[str, Any]) -> dict[str, Any]:
+    return _mcp_text(json.dumps(registry.zakon_tree, ensure_ascii=False, indent=2))
+
+
+# --- 6b: URL a zásobník ---
+
+@tool("validate_zakon_url", "Ověř dostupnost URL pro zákon na zakonyprolidi.cz", {"zakon_id": str})
+async def validate_url_tool(args: dict[str, Any]) -> dict[str, Any]:
+    result = await build_and_validate(args["zakon_id"])
+    return _mcp_text(json.dumps(result, ensure_ascii=False))
+
+
+@tool(
+    "add_to_pending",
+    "Přidej zákon do zásobníku čekajícího na potvrzení uživatelem",
+    {"zakon_id": str, "zminen_v": str},
+)
+async def add_to_pending_tool(args: dict[str, Any]) -> dict[str, Any]:
+    zakon_id = args["zakon_id"]
+    if any(p["zakon_id"] == zakon_id for p in registry.pending_zakony):
+        return _mcp_text(f"Zákon {zakon_id} je již v zásobníku")
+    result = await build_and_validate(zakon_id)
+    registry.pending_zakony.append({
+        "zakon_id": zakon_id,
+        "url": result["url"],
+        "zminen_v": args.get("zminen_v", ""),
+        "valid": result["valid"],
+    })
+    status = "URL nalezena" if result["valid"] else "URL nenalezena — bude třeba zadat ručně"
+    return _mcp_text(f"Zákon {zakon_id} přidán do zásobníku. {status}")
+
+
+@tool(
+    "load_from_pending",
+    "Načti a spusť zákon ze zásobníku (vyžaduje souhlas uživatele předem)",
+    {"zakon_id": str},
+)
+async def load_from_pending_tool(args: dict[str, Any]) -> dict[str, Any]:
+    zakon_id = args["zakon_id"]
+    entry = next((p for p in registry.pending_zakony if p["zakon_id"] == zakon_id), None)
+    if not entry:
+        return _mcp_text(f"Zákon {zakon_id} není v zásobníku")
+    if not entry["valid"]:
+        return _mcp_text(
+            f"URL pro zákon {zakon_id} není platná. Zadej URL ručně pomocí spawn_zakon_agent."
+        )
+    result = await spawn_zakon_agent_tool({"zakon_id": zakon_id, "url": entry["url"]})
+    registry.pending_zakony.remove(entry)
+    return result
+
+
+# --- 6c: Spawn a ask ---
+
+@tool(
+    "spawn_zakon_agent",
+    "Načti zákon a spusť sub-agenta. Pokud zákon je v databázi, url může být prázdný string.",
+    {"zakon_id": str, "url": str},
+)
+async def spawn_zakon_agent_tool(args: dict[str, Any]) -> dict[str, Any]:
+    zakon_id = args["zakon_id"]
+    url = args.get("url", "")
+
+    if zakon_id in registry.agent_registry:
+        return _mcp_text(f"Agent pro {zakon_id} již běží.")
+
+    meta = get_zakon(zakon_id)
+
+    if not meta:
+        if not url:
+            return _mcp_text(f"Zákon {zakon_id} není v databázi a URL nebyla poskytnuta.")
+
+        zakon_text = await fetch_zakon(url)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        zakon_path = DATA_DIR / f"{zakon_id.replace('/', '_')}.txt"
+        zakon_path.write_text(zakon_text, encoding="utf-8")
+
+        analysis = await process_zakon(zakon_id, zakon_text)
+
+        meta = {
+            "nazev": analysis.get("nazev", zakon_id),
+            "stazeno": date.today().isoformat(),
+            "url": url,
+            "zakon_text_path": str(zakon_path),
+            "system_prompt": analysis["system_prompt"],
+            "summary": analysis["summary"],
+            "klic_pojmy": analysis["klic_pojmy"],
+            "seznam_paragrafu": analysis["seznam_paragrafu"],
+            "odkazy": analysis.get("nove_odkazy", []),
+            "model": MODEL,
+        }
+        set_zakon(zakon_id, meta)
+
+    client = await spawn_sub_agent(zakon_id, meta)
+    registry.agent_registry[zakon_id] = client
+    registry.zakon_tree[zakon_id] = {
+        "spawned_by": None,
+        "children": meta.get("odkazy", []),
+        "spawned_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    return _mcp_text(f"Zákon {zakon_id} ({meta['nazev']}) připraven. Agent spuštěn.")
+
+
+@tool(
+    "ask_zakon_agent",
+    "Přepošli dotaz sub-agentovi pro konkrétní zákon",
+    {"zakon_id": str, "dotaz": str},
+)
+async def ask_zakon_agent_tool(args: dict[str, Any]) -> dict[str, Any]:
+    zakon_id = args["zakon_id"]
+    client = registry.agent_registry.get(zakon_id)
+    if not client:
+        return _mcp_text(
+            f"Agent pro zákon {zakon_id} neexistuje. Nejprve ho načti přes spawn_zakon_agent."
+        )
+
+    await client.query(args["dotaz"])
+
+    odpoved = ""
+    async for message in client.receive_response():
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    odpoved += block.text
+    return _mcp_text(odpoved)
+
+
+# --- 6d: Hook ---
+
+async def inject_context_hook(
+    input_data: UserPromptSubmitHookInput,
+    tool_use_id: str | None,
+    context: HookContext,
+) -> HookJSONOutput:
+    parts = []
+    if registry.agent_registry:
+        parts.append(f"Aktivní sub-agenti: {', '.join(registry.agent_registry.keys())}")
+    if registry.pending_zakony:
+        ids = [p["zakon_id"] for p in registry.pending_zakony]
+        parts.append(f"Zásobník (čeká na potvrzení): {', '.join(ids)}")
+
+    if parts:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": " | ".join(parts),
+            }
+        }
+    return {}
+
+
+# --- 6e: Sestavení orchestrátora ---
+
+def create_orchestrator() -> ClaudeSDKClient:
+    zakon_tools = create_sdk_mcp_server(
+        name="zakon_tools",
+        version="1.0.0",
+        tools=[
+            check_index_tool,
+            validate_url_tool,
+            spawn_zakon_agent_tool,
+            ask_zakon_agent_tool,
+            list_active_agents_tool,
+            add_to_pending_tool,
+            list_pending_tool,
+            load_from_pending_tool,
+            get_zakon_tree_tool,
+        ],
+    )
+
+    options = ClaudeAgentOptions(
+        system_prompt=SYSTEM_PROMPT,
+        model=MODEL,
+        mcp_servers={"zakon_tools": zakon_tools},
+        allowed_tools=[
+            "mcp__zakon_tools__check_index",
+            "mcp__zakon_tools__validate_zakon_url",
+            "mcp__zakon_tools__spawn_zakon_agent",
+            "mcp__zakon_tools__ask_zakon_agent",
+            "mcp__zakon_tools__list_active_agents",
+            "mcp__zakon_tools__add_to_pending",
+            "mcp__zakon_tools__list_pending_zakony",
+            "mcp__zakon_tools__load_from_pending",
+            "mcp__zakon_tools__get_zakon_tree",
+        ],
+        hooks={
+            "UserPromptSubmit": [
+                HookMatcher(matcher=None, hooks=[inject_context_hook]),
+            ],
+        },
+    )
+
+    return ClaudeSDKClient(options=options)
