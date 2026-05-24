@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 
 ROOT = Path(__file__).parent.parent
+# Jeden soubor pro všechna metadata zákonů — klíč je "CISLO/ROK", např. "183/2006"
 INDEX_PATH = ROOT / "index.json"
 
 

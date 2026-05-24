@@ -6,6 +6,7 @@ from zakon_agent.agents.sub_agent import shutdown_sub_agent
 from zakon_agent.orchestrator import create_orchestrator
 
 
+# Vstupní bod aplikace — spouští se přes `python -m zakon_agent` nebo příkazem definovaným v pyproject.toml
 async def main():
     print("=== Systém analýzy zákonů ===")
     print("Zadej dotaz nebo 'konec' pro ukončení.\n")

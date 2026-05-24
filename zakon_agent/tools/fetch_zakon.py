@@ -28,19 +28,20 @@ def _frags_to_markdown(frags: Tag) -> str:
         if not text or "AT" in cls or "PPC0" in cls or cls == {"L0"}:
             continue
 
-        if "CAST" in cls:
+        # CSS třídy specifické pro zakonyprolidi.cz — mapování na markdown nadpisy
+        if "CAST" in cls:       # Část zákona (nejvyšší úroveň)
             parts.append(f"\n## {text}")
             last_header_idx = len(parts) - 1
-        elif "HLAVA" in cls:
+        elif "HLAVA" in cls:    # Hlava
             parts.append(f"\n### {text}")
             last_header_idx = len(parts) - 1
-        elif "DIL" in cls:
+        elif "DIL" in cls:      # Díl
             parts.append(f"\n#### {text}")
             last_header_idx = len(parts) - 1
-        elif "ODDIL" in cls:
+        elif "ODDIL" in cls:    # Oddíl
             parts.append(f"\n##### {text}")
             last_header_idx = len(parts) - 1
-        elif "PARA" in cls:
+        elif "PARA" in cls:     # Paragraf (§)
             parts.append(f"\n### {text}")
             last_header_idx = len(parts) - 1
         elif "NADPIS" in cls or "TEMP" in cls:
@@ -75,6 +76,7 @@ async def fetch_zakon(url: str) -> str:
     for tag in soup(["nav", "header", "footer", "script", "style", "aside"]):
         tag.decompose()
 
+    # "Frags" je hlavní kontejner textu na zakonyprolidi.cz — pokud web změní strukturu, hledej sem
     frags = soup.find(class_="Frags")
     if frags:
         text = _frags_to_markdown(frags)
@@ -84,7 +86,7 @@ async def fetch_zakon(url: str) -> str:
             )
         return text
 
-    # Fallback pro jiné weby — plain text bez struktury
+    # Fallback pro jiné weby — plain text bez struktury (bez markdown nadpisů)
     main = soup.find("main") or soup.find("article") or soup.body
     text = main.get_text(separator="\n", strip=True) if main else ""
     lines = [line.strip() for line in text.splitlines() if line.strip()]

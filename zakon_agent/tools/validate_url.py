@@ -1,6 +1,8 @@
 import httpx
 
 
+# Vzor URL na zakonyprolidi.cz: "183/2006" → "https://www.zakonyprolidi.cz/cs/2006-183"
+# Pokud chceš jiný zdroj zákonů, změň tuto funkci a fetch_zakon.py (parsování HTML se liší)
 def build_url(zakon_id: str) -> str:
     cislo, rok = zakon_id.split("/")
     return f"https://www.zakonyprolidi.cz/cs/{rok}-{cislo}"

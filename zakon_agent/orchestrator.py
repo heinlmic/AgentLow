@@ -50,9 +50,14 @@ async def _progress(label: str):
         await task
 
 
+# Kam se ukládají stažené texty zákonů jako .md soubory
 DATA_DIR = ROOT / "data" / "zakony"
+
+# Model pro orchestrátora — změň sem pokud chceš jiný model (platí i pro sub-agenty v sub_agent.py)
 MODEL = "claude-sonnet-4-6"
 
+# Hlavní chování orchestrátora — tady změníš jak Claude rozhoduje o zákonech,
+# v jakém pořadí volá nástroje a co smí/nesmí odpovídat z vlastní znalosti.
 SYSTEM_PROMPT = """Jsi orchestrátor systému pro analýzu českých zákonů.
 
 ## Nástroje
@@ -87,6 +92,7 @@ Pokud odpověď sub-agenta obsahuje "zákon č. X/RRRR Sb." nebo "vyhláška č.
 - Pokud zásobník není prázdný, vždy nabídni načtení na konci odpovědi."""
 
 
+# Každý nástroj musí vracet tento formát — MCP protokol to vyžaduje
 def _mcp_text(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}]}
 
@@ -182,6 +188,7 @@ async def spawn_zakon_agent_tool(args: dict[str, Any]) -> dict[str, Any]:
         return _mcp_text(f"Agent pro {zakon_id} již běží.")
 
     meta = get_zakon(zakon_id)
+    # Zákon může být v index.json ale .md soubor manuálně smazaný — pak stahujeme znovu
     text_missing = meta is not None and not Path(meta["zakon_text_path"]).exists()
 
     if not meta or text_missing:
@@ -202,8 +209,11 @@ async def spawn_zakon_agent_tool(args: dict[str, Any]) -> dict[str, Any]:
         zakon_path.write_text(zakon_text, encoding="utf-8")
 
         if not meta:
+            # Nový zákon — temporary_agent vygeneruje system_prompt, summary atd.
+            # Tohle je nejpomalejší krok (LLM analýza celého textu)
             async with _progress(f"Analyzuji zákon {zakon_id} (Claude AI — může trvat minutu)"):
                 analysis = await process_zakon(zakon_id, zakon_text)
+            # Struktura záznamu v index.json — pokud přidáváš pole, doplň i do ZAKON_SCHEMA v temporary_agent.py
             meta = {
                 "nazev": analysis.get("nazev", zakon_id),
                 "stazeno": date.today().isoformat(),
@@ -259,6 +269,8 @@ async def ask_zakon_agent_tool(args: dict[str, Any]) -> dict[str, Any]:
 
 # --- 6d: Hook ---
 
+# Hook se spustí před každým promptem — přidává orchestrátorovi kontext o běžících agentech.
+# Pokud chceš přidat další automatický kontext (např. datum, uživatelské nastavení), doplň sem.
 async def inject_context_hook(
     input_data: UserPromptSubmitHookInput,
     tool_use_id: str | None,
@@ -283,6 +295,10 @@ async def inject_context_hook(
 
 # --- 6e: Sestavení orchestrátora ---
 
+# Nový nástroj přidáš ve 3 krocích:
+#   1. Definuj async funkci s @tool dekorátorem výše v tomto souboru
+#   2. Přidej ji do seznamu tools= níže
+#   3. Přidej "mcp__zakon_tools__<jmeno>" do allowed_tools=
 def create_orchestrator() -> ClaudeSDKClient:
     zakon_tools = create_sdk_mcp_server(
         name="zakon_tools",

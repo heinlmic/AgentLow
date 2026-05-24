@@ -2,6 +2,7 @@ import asyncio
 
 from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage
 
+# Schéma JSON výstupu z analýzy — pokud přidáš pole sem, musíš ho doplnit i do meta{} v orchestrator.py
 ZAKON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -23,6 +24,9 @@ async def process_zakon(zakon_id: str, zakon_text: str) -> dict:
         output_format={"type": "json_schema", "schema": ZAKON_SCHEMA},
     )
 
+    # Prompt pro jednorázovou analýzu zákona — výsledek se uloží do index.json a znovu se negeneruje.
+    # Limit 100 000 znaků: většina zákonů se vejde, u velmi velkých (zákoník práce apod.) se text ořízne.
+    # Pokud chceš více paragrafů v seznamu nebo jiný formát, uprav instrukce níže.
     prompt = f"""Analyzuj tento český zákon. Vrať:
 - nazev: krátký název zákona
 - summary: 3 věty o čem zákon je
