@@ -98,10 +98,55 @@ Asistent: Zákon 500/2004 (Správní řád) připraven. Agent spuštěn.
 ### Ukončení
 
 ```
-Dotaz: konec
+Dotaz (nebo 'konec'): konec
 ```
 
 Při ukončení každý sub-agent shrne probraná témata a zákon vydí ze seznamu aktivních agentů.
+
+### Reálný příklad — stavební zákon
+
+```
+=== Systém analýzy zákonů ===
+
+Dotaz (nebo 'konec'): jaka je minimalni vzdalenost objektu od hranice pozemku 283/2021
+                      abych nemusel resit stavebni povoleni?
+
+Asistent: Zákon 283/2021 je v databázi. Spouštím sub-agenta.
+
+          ## Minimální vzdálenost od hranice pozemku: **2 metry**
+
+          | Typ stavby           | Plocha    | Výška  | Vzdálenost od hranice |
+          |----------------------|-----------|--------|------------------------|
+          | Stavba na pozemku RD | max 40 m² | max 5m | min. 2 m               |
+          | Skleník nebo bazén   | max 40 m² | max 5m | min. 2 m               |
+          | Rekreační oblast     | max 55 m² | max 4m | min. 2 m               |
+
+          > Zákon 183/2006 Sb. byl v odpovědi zmíněn. Přidávám do zásobníku.
+          Zásobník: [183/2006]
+          [$0.0968]
+
+Dotaz (nebo 'konec'): nacti 183/2006 a porovnej zasadni rozdil u staveb bez povoleni
+
+Asistent: Načítám zákon 183/2006 ze zásobníku...
+
+          ## Zásadní rozdíly: stavby bez povolení
+
+          |                 | 183/2006 Sb.           | 283/2021 Sb.       |
+          |-----------------|------------------------|--------------------|
+          | Systém          | **3 stupně**           | **2 stupně**       |
+          | Bez povolení    | do 25 m²               | do **40 m²**       |
+          | Ohlášení        | ✅ existuje (§ 104)    | ❌ zrušeno         |
+
+          Klíčová změna: ohlášení bylo zcela zrušeno. Co dříve stačilo ohlásit,
+          dnes buď nevyžaduje nic, nebo vyžaduje plné povolení záměru.
+          [$0.3571]
+
+Dotaz (nebo 'konec'): konec
+Ukončuji agenta pro 283/2021...
+Ukončuji agenta pro 183/2006...
+
+Celková cena session: $0.4539
+```
 
 ## Struktura projektu
 

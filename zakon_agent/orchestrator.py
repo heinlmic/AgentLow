@@ -48,6 +48,8 @@ async def _progress(label: str):
     finally:
         stop.set()
         await task
+
+
 DATA_DIR = ROOT / "data" / "zakony"
 MODEL = "claude-sonnet-4-6"
 
@@ -99,21 +101,21 @@ async def check_index_tool(args: dict[str, Any]) -> dict[str, Any]:
     return _mcp_text("Zákon není v databázi")
 
 
-@tool("list_active_agents", "Vypiš zákon ID všech aktivních sub-agentů", {"_dummy": str})
+@tool("list_active_agents", "Vypiš zákon ID všech aktivních sub-agentů", {})
 async def list_active_agents_tool(args: dict[str, Any]) -> dict[str, Any]:
     if not registry.agent_registry:
         return _mcp_text("Žádní aktivní agenti")
     return _mcp_text(", ".join(registry.agent_registry.keys()))
 
 
-@tool("list_pending_zakony", "Vypiš zásobník zákonů čekajících na načtení", {"_dummy": str})
+@tool("list_pending_zakony", "Vypiš zásobník zákonů čekajících na načtení", {})
 async def list_pending_tool(args: dict[str, Any]) -> dict[str, Any]:
     if not registry.pending_zakony:
         return _mcp_text("Zásobník je prázdný")
     return _mcp_text(json.dumps(registry.pending_zakony, ensure_ascii=False))
 
 
-@tool("get_zakon_tree", "Zobraz strom vztahů mezi načtenými zákony", {"_dummy": str})
+@tool("get_zakon_tree", "Zobraz strom vztahů mezi načtenými zákony", {})
 async def get_zakon_tree_tool(args: dict[str, Any]) -> dict[str, Any]:
     return _mcp_text(json.dumps(registry.zakon_tree, ensure_ascii=False, indent=2))
 

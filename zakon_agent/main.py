@@ -10,10 +10,12 @@ async def main():
     print("=== Systém analýzy zákonů ===")
     print("Zadej dotaz nebo 'konec' pro ukončení.\n")
 
+    session_cost = 0.0
+
     async with create_orchestrator() as orchestrator:
         while True:
             try:
-                dotaz = input("Dotaz: ").strip()
+                dotaz = input("Dotaz (nebo 'konec'): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nUkončuji...")
                 break
@@ -32,12 +34,19 @@ async def main():
                             print(f"\nAsistent: {block.text}")
                 elif isinstance(message, ResultMessage):
                     if message.total_cost_usd and message.total_cost_usd > 0:
+                        session_cost += message.total_cost_usd
                         print(f"[${message.total_cost_usd:.4f}]")
             print()
 
-    for zakon_id in list(registry.agent_registry.keys()):
-        print(f"Ukončuji agenta pro {zakon_id}...")
-        await shutdown_sub_agent(zakon_id)
+    try:
+        for zakon_id in list(registry.agent_registry.keys()):
+            print(f"Ukončuji agenta pro {zakon_id}...")
+            await shutdown_sub_agent(zakon_id)
+    except KeyboardInterrupt:
+        print("\nVynucené ukončení — agenti nebyli řádně uzavřeni.")
+
+    if session_cost > 0:
+        print(f"\nCelková cena session: ${session_cost:.4f}")
 
 
 def run():
