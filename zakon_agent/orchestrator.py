@@ -1,4 +1,7 @@
+import asyncio
 import json
+import sys
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,10 +23,31 @@ from zakon_agent import registry
 from zakon_agent.agents.sub_agent import spawn_sub_agent
 from zakon_agent.agents.temporary_agent import process_zakon
 from zakon_agent.store import get_zakon, set_zakon
-from zakon_agent.tools.fetch_zakon import fetch_zakon
+from zakon_agent.tools.fetch_zakon import ZakonContentError, fetch_zakon
 from zakon_agent.tools.validate_url import build_and_validate
 
 ROOT = Path(__file__).parent.parent
+
+
+async def _spinner_task(label: str, stop_event: asyncio.Event) -> None:
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    i = 0
+    while not stop_event.is_set():
+        print(f"\r  {frames[i % len(frames)]} {label}", end="", flush=True)
+        i += 1
+        await asyncio.sleep(0.1)
+    print(f"\r  ✓ {label}          ", flush=True)
+
+
+@asynccontextmanager
+async def _progress(label: str):
+    stop = asyncio.Event()
+    task = asyncio.create_task(_spinner_task(label, stop))
+    try:
+        yield
+    finally:
+        stop.set()
+        await task
 DATA_DIR = ROOT / "data" / "zakony"
 MODEL = "claude-sonnet-4-6"
 
@@ -46,9 +70,7 @@ SYSTEM_PROMPT = """Jsi orchestrátor systému pro analýzu českých zákonů.
 1. check_index(zakon_id)
 2. JE v databázi → spawn_zakon_agent(zakon_id, url="") → ask_zakon_agent(...)
 3. NENÍ v databázi → validate_zakon_url(zakon_id)
-   a. URL platná → zeptej se uživatele: "Nalezl jsem zákon X/RRRR. Mám ho načíst?"
-      - Uživatel ANO → spawn_zakon_agent(zakon_id, url)
-      - Uživatel NE / SPÄTER → add_to_pending(zakon_id, zminen_v="")
+   a. URL platná → informuj uživatele "Načítám zákon X/RRRR..." → spawn_zakon_agent(zakon_id, url) → ask_zakon_agent(dotaz)
    b. URL neplatná → informuj uživatele, požádej o URL ručně
 
 ## Detekce odkazů v odpovědích sub-agentů
@@ -158,30 +180,44 @@ async def spawn_zakon_agent_tool(args: dict[str, Any]) -> dict[str, Any]:
         return _mcp_text(f"Agent pro {zakon_id} již běží.")
 
     meta = get_zakon(zakon_id)
+    text_missing = meta is not None and not Path(meta["zakon_text_path"]).exists()
 
-    if not meta:
-        if not url:
+    if not meta or text_missing:
+        download_url = url or (meta["url"] if meta else "")
+        if not download_url:
             return _mcp_text(f"Zákon {zakon_id} není v databázi a URL nebyla poskytnuta.")
 
-        zakon_text = await fetch_zakon(url)
+        try:
+            async with _progress(f"Stahuji zákon {zakon_id}"):
+                zakon_text = await fetch_zakon(download_url)
+        except ZakonContentError as e:
+            return _mcp_text(f"Chyba obsahu: {e}")
+        except Exception as e:
+            return _mcp_text(f"Nepodařilo se stáhnout zákon {zakon_id}: {e}")
+
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        zakon_path = DATA_DIR / f"{zakon_id.replace('/', '_')}.txt"
+        zakon_path = DATA_DIR / f"{zakon_id.replace('/', '_')}.md"
         zakon_path.write_text(zakon_text, encoding="utf-8")
 
-        analysis = await process_zakon(zakon_id, zakon_text)
+        if not meta:
+            async with _progress(f"Analyzuji zákon {zakon_id} (Claude AI — může trvat minutu)"):
+                analysis = await process_zakon(zakon_id, zakon_text)
+            meta = {
+                "nazev": analysis.get("nazev", zakon_id),
+                "stazeno": date.today().isoformat(),
+                "url": download_url,
+                "zakon_text_path": str(zakon_path),
+                "system_prompt": analysis["system_prompt"],
+                "summary": analysis["summary"],
+                "klic_pojmy": analysis["klic_pojmy"],
+                "seznam_paragrafu": analysis["seznam_paragrafu"],
+                "odkazy": analysis.get("nove_odkazy", []),
+                "model": MODEL,
+            }
+        else:
+            # text byl smazán, metadata v indexu jsou stále platná
+            meta["zakon_text_path"] = str(zakon_path)
 
-        meta = {
-            "nazev": analysis.get("nazev", zakon_id),
-            "stazeno": date.today().isoformat(),
-            "url": url,
-            "zakon_text_path": str(zakon_path),
-            "system_prompt": analysis["system_prompt"],
-            "summary": analysis["summary"],
-            "klic_pojmy": analysis["klic_pojmy"],
-            "seznam_paragrafu": analysis["seznam_paragrafu"],
-            "odkazy": analysis.get("nove_odkazy", []),
-            "model": MODEL,
-        }
         set_zakon(zakon_id, meta)
 
     client = await spawn_sub_agent(zakon_id, meta)

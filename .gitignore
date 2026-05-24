@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Zákon agent — generovaná data
+index.json
+data/zakony/*.txt
+data/zakony/*.md
